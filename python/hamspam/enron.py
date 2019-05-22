@@ -1,3 +1,5 @@
+from multiprocessing import freeze_support
+
 import numpy as np
 import math
 import datetime,time
@@ -12,6 +14,19 @@ NToPredict=20
 # utilities and set up
 def p(msg): print(msg)
 
+def formatTimeDelta(td):
+  return '%d.%d' %(td.total_seconds() , int(td.microseconds/1000))
+
+def timeit(tag, block):
+  import timeit
+  def getNow(): return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+
+  startt = datetime.datetime.now()
+  print('Starting %s at %s..' %(tag,getNow()))
+  timeit.Timer(block)
+  duration = formatTimeDelta(datetime.datetime.now() - startt)
+  print('Completed %s at %s with duration=%s secs' %(tag,getNow(), duration))
+  
 def read(path):
   import codecs
   p('reading %s ..' %path)
@@ -169,41 +184,63 @@ def predict(pt: Point, centroids: CentroidType, closestK: int = 5) -> str:
   votes = Counter([v[0].split(":")[0] for v in voters]).most_common()
   return votes[0][0]
 
-def formatTimeDelta(td):
-  return '%d.%d' %(td.total_seconds() , int(td.microseconds/1000))
-
 def accuracy(acts,expecteds):
   return float(np.count_nonzero(npa(expecteds) == npa(acts))) / len(expecteds)
   
+#########
+if __name__ == '__main__':
+
+  import dask
+  from dask import bag as daskbag
+
+  from distributed import Client, LocalCluster
+  # cluster = LocalCluster(n_workers=8, threads_per_worker=2)
+  cluster = LocalCluster(n_workers=1, threads_per_worker=1)
+  client = Client(cluster)
   
-p('STARTING job at %s ..' %time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()))
-startt = datetime.datetime.now()
+  freeze_support()
+  p('STARTING job at %s ..' %time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()))
+  startt = datetime.datetime.now()
+  
+  # Read the data files
+  bows: Dict = {}  # bags of words in form of lists of Dicts with a list for Ham's another for Spam's
+  for i in [HAM,SPM]:
+    fnames = daskbag.from_sequence(listFiles(fpaths[i],MaxFiles))
+    files = fnames.map(read)
+    bows[i] = files.map(ngrams)
+    bows[i].compute()
 
-# Read the data files
-bows: Dict = {}  # bags of words in form of lists of Dicts with a list for Ham's another for Spam's
-for i in [HAM,SPM]:
-  bows[i] = [ngrams(read(f)) for f in listFiles(fpaths[i],MaxFiles)]
-
-# Create the word dimension
-allTerms = terms(bows[HAM].__add__(bows[SPM]))
-
-# Apply word dimension to all docs in both ham/spam
-wvecs = [[wordvec(allTerms, doc) for doc in bows[hamspm][:MaxDocs]] for hamspm in [HAM,SPM]]
-
-centroids = [ kmeans(wvecs[hamspm], K=7, maxIters=10) for hamspm in [HAM,SPM]]
-labeledCentroids = np.vstack(np.array([[('%d:%d' %(hamspm,idptt[0]),idptt[1]) for idptt in idpt]
-                                       for hamspm,idpt in list(zip([HAM,SPM],centroids))]))
-
-# try out first 10 of each ham, spam - see if they get properly predicted
-preds = [[predict(p, labeledCentroids, 5) for p in wvecs[hamspm][:NToPredict]] for hamspm in [HAM,SPM]]
-
-p(repr(preds))
-
-acc = accuracy(preds, np.concatenate((np.zeros(NToPredict),np.ones(NToPredict))))
-p('COMPLETED job with Accuracy=%f at %s duration: %s secs' %(acc,
-                                                             time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
-                                            formatTimeDelta(datetime.datetime.now() - startt)))
-
-# now let's re-test against the full input dataset to see how ham/spam fall out
-
-
+  # Create the word dimension
+  allTerms = terms(bows.values())
+  
+  # Apply word dimension to all docs in both ham/spam
+  from functools import partial
+  wvecs = []
+  for hamspm in [HAM,SPM]:
+    bow = daskbag.from_sequence(bows[hamspm][:MaxDocs])
+    wordvec1 = partial(wordvec, allTerms)
+    wvec = bow.map(wordvec1(allTerms))
+    p('Computing wordvec for hamspm=%d ..' %hamspm)
+    wvec.compute()
+    wvecs.append(wvec)
+    
+  for hamspm in [HAM,SPM]:
+    centroids = wvecs[hamspm].map(kmeans)
+    centroids.compute()
+    
+  labeledCentroids = np.vstack(np.array([[('%d:%d' %(hamspm,idptt[0]),idptt[1]) for idptt in idpt]
+                                         for hamspm,idpt in list(zip([HAM,SPM],centroids))]))
+  
+  # try out first 10 of each ham, spam - see if they get properly predicted
+  preds = [[predict(p, labeledCentroids, 5) for p in wvecs[hamspm][:NToPredict]] for hamspm in [HAM,SPM]]
+  
+  p(repr(preds))
+  
+  acc = accuracy(preds, np.concatenate((np.zeros(NToPredict),np.ones(NToPredict))))
+  p('COMPLETED job with Accuracy=%f at %s duration: %s secs' %(acc,
+                                                               time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                              formatTimeDelta(datetime.datetime.now() - startt)))
+  
+  # now let's re-test against the full input dataset to see how ham/spam fall out
+    
+  

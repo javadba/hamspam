@@ -8,6 +8,8 @@ A vector similarity approach was used and then clustering of the resulting spars
 
 # Details of implementation
 
+Note: the _only_ interesting source code/file here is **enron.py** . In particular please _ignore_ the testing files: I learnt the hard way that creating test classes from a script is fraught in python. 
+
 ## Data Munging
 * Parse each "document" by:
    * optionally removing any punctuation
